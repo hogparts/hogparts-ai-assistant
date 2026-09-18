@@ -1,60 +1,17 @@
 import express from "express";
 import OpenAI from "openai";
-
-const app = express();
-app.use(express.json({ limit: "64kb" }));
-
-const PORT = process.env.PORT || 3000;
-const SHOP = process.env.SHOPIFY_STORE_DOMAIN || "hogparts.com";
-const STOREFRONT_TOKEN = process.env.SHOPIFY_STOREFRONT_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
-
-const SYSTEM = `You are the Hogparts AI Assistant for Hogparts UK Ltd, an independent UK motorcycle parts retailer specialising in aftermarket Harley-Davidson parts. Hogparts UK Ltd is independent and has no relationship with Harley-Davidson.
-Use British English. Never invent product fitment, stock, specifications, prices or delivery information. Treat fitment as confirmed only when the supplied Hogparts catalogue data explicitly supports it. If evidence is insufficient, say that fitment cannot be confirmed and suggest contacting the Hogparts team. Keep answers concise and useful. Do not hard-sell.`;
-
-async function storefront(query, variables = {}) {
-  if (!STOREFRONT_TOKEN) throw new Error("Shopify Storefront token not configured");
-  const r = await fetch(`https://${SHOP}/api/2026-07/graphql.json`, {
-    method: "POST",
-    headers: {"Content-Type":"application/json","X-Shopify-Storefront-Access-Token":STOREFRONT_TOKEN},
-    body: JSON.stringify({query, variables})
-  });
-  if (!r.ok) throw new Error(`Shopify request failed: ${r.status}`);
-  const j = await r.json();
-  if (j.errors) throw new Error(j.errors.map(e=>e.message).join("; "));
-  return j.data;
-}
-
-async function searchProducts(search) {
-  const q = `query Search($q:String!){products(first:8,query:$q){nodes{id handle title vendor productType description featuredImage{url altText} variants(first:5){nodes{id title sku price{amount currencyCode} availableForSale}} fitment:metafield(namespace:"custom",key:"fitment"){value} specifications:metafield(namespace:"custom",key:"specifications"){value}}}}`;
-  return (await storefront(q,{q:search})).products.nodes;
-}
-
-app.get("/health", (_req,res)=>res.json({ok:true,service:"hogparts-ai-assistant",shop:SHOP,aiConfigured:Boolean(OPENAI_API_KEY),shopifyConfigured:Boolean(STOREFRONT_TOKEN)}));
-
-app.post("/api/search", async (req,res)=>{
-  try {
-    const q=String(req.body?.q||"").trim();
-    if(!q) return res.status(400).json({error:"Search query required"});
-    res.json({products:await searchProducts(q)});
-  } catch(e){res.status(500).json({error:e.message});}
-});
-
-app.post("/api/chat", async (req,res)=>{
-  try {
-    if(!OPENAI_API_KEY) return res.status(503).json({error:"AI is not configured yet"});
-    const message=String(req.body?.message||"").trim();
-    if(!message) return res.status(400).json({error:"Message required"});
-    let products=[];
-    try { products=await searchProducts(message); } catch {}
-    const catalogue=products.map(p=>({title:p.title,handle:p.handle,vendor:p.vendor,productType:p.productType,description:p.description,fitment:p.fitment?.value||"",specifications:p.specifications?.value||"",variants:p.variants.nodes.map(v=>({sku:v.sku,title:v.title,price:v.price,availableForSale:v.availableForSale}))}));
-    const client=new OpenAI({apiKey:OPENAI_API_KEY});
-    const response=await client.responses.create({model:MODEL,instructions:SYSTEM,input:`Customer question: ${message}\n\nRelevant Hogparts catalogue results:\n${JSON.stringify(catalogue)}`});
-    res.json({answer:response.output_text,products:products.slice(0,4).map(p=>({title:p.title,handle:p.handle,image:p.featuredImage?.url||null,url:`https://hogparts.com/products/${p.handle}`}))});
-  } catch(e){res.status(500).json({error:e.message});}
-});
-
-app.get("/",(_req,res)=>res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Hogparts AI Assistant</title><style>body{font:16px Arial,sans-serif;max-width:760px;margin:50px auto;padding:20px;background:#f5f5f5}.box{background:white;padding:24px;border-radius:12px}input{width:75%;padding:12px}button{padding:12px}#out{white-space:pre-wrap;margin-top:20px}</style></head><body><div class="box"><h1>Hogparts AI Assistant</h1><p>Development test interface. Not connected to the live storefront.</p><input id="q" placeholder="Ask about a product or fitment"><button onclick="go()">Ask</button><div id="out"></div></div><script>async function go(){let o=document.getElementById("out");o.textContent="Thinking...";let r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:document.getElementById("q").value})});let j=await r.json();o.textContent=j.answer||j.error||"No response";}</script></body></html>`));
-
-app.listen(PORT,()=>console.log(`Hogparts AI Assistant listening on ${PORT}`));
+const app=express(); app.use(express.json({limit:"64kb"}));
+const PORT=process.env.PORT||3000, SHOP=process.env.SHOPIFY_STORE_DOMAIN||"hogparts.com";
+const TOKEN=process.env.SHOPIFY_STOREFRONT_TOKEN, KEY=process.env.OPENAI_API_KEY, MODEL=process.env.OPENAI_MODEL||"gpt-5-mini";
+const SYSTEM=`You are the Hogparts AI Assistant for Hogparts UK Ltd, an independent UK aftermarket motorcycle-parts retailer with no relationship with Harley-Davidson. Use British English. Never invent fitment, stock, specifications, prices or delivery information. A fitment is confirmed only if the supplied Hogparts product data explicitly contains the requested model/model code and requested year. Product descriptions may contain labelled Specifications and Fitment sections; treat those as catalogue evidence. Tags beginning Bike Model Year_, Bike Model Name_ and Bike Model Family_ are also catalogue evidence, but model-specific fitment is stronger than family-only tags. Do not claim family-only tags prove exact model fitment. If evidence is insufficient, say so. Keep answers concise and useful; do not hard-sell.`;
+async function sf(query,variables={}){if(!TOKEN)throw Error("Shopify Storefront token not configured");const r=await fetch(`https://${SHOP}/api/2026-07/graphql.json`,{method:"POST",headers:{"Content-Type":"application/json","Shopify-Storefront-Private-Token":TOKEN},body:JSON.stringify({query,variables})});const j=await r.json();if(!r.ok||j.errors)throw Error(j.errors?.map(e=>e.message).join("; ")||`Shopify request failed: ${r.status}`);return j.data}
+const PQ=`query Search($q:String!){products(first:25,query:$q){nodes{id handle title vendor productType description tags featuredImage{url altText} variants(first:3){nodes{id title sku price{amount currencyCode} availableForSale}} fitment:metafield(namespace:"custom",key:"fitment"){value} specifications:metafield(namespace:"custom",key:"specifications"){value}}}}`;
+async function one(q){return (await sf(PQ,{q})).products.nodes}
+function uniq(arr){const m=new Map();for(const p of arr)m.set(p.id,p);return [...m.values()]}
+function score(p,t){const s=(p.title+" "+p.productType+" "+p.description+" "+(p.tags||[]).join(" ")).toLowerCase();let n=0;for(const x of [t.part,t.modelCode,t.model,String(t.year||"")])if(x&&s.includes(String(x).toLowerCase()))n+=x===t.part?6:4;if(t.position&&s.includes(t.position.toLowerCase()))n+=2;return n}
+async function interpret(client,message){const r=await client.responses.create({model:MODEL,instructions:"Extract a motorcycle-parts shopping query. Return ONLY compact JSON with keys part, year, make, model, modelCode, family, position. Use null when unknown. Example: front brake pads for a 2020 Low Rider FXLR => part brake pads, year 2020, model Low Rider, modelCode FXLR, family Softail, position front.",input:message});try{return JSON.parse(r.output_text)}catch{return {part:message}}}
+async function retrieve(t,message){const qs=[t.part,message];if(t.part&&t.modelCode)qs.push(`${t.part} ${t.modelCode}`);if(t.part&&t.model)qs.push(`${t.part} ${t.model}`);if(t.part&&t.year)qs.push(`${t.part} ${t.year}`);if(t.modelCode)qs.push(t.modelCode);if(t.model)qs.push(t.model);const batches=await Promise.all([...new Set(qs.filter(Boolean))].slice(0,6).map(q=>one(q).catch(()=>[])));return uniq(batches.flat()).map(p=>({p,s:score(p,t)})).sort((a,b)=>b.s-a.s).slice(0,20).map(x=>x.p)}
+app.get("/health",(_q,r)=>r.json({ok:true,shop:SHOP,aiConfigured:!!KEY,shopifyConfigured:!!TOKEN}));
+app.post("/api/chat",async(req,res)=>{try{if(!KEY)return res.status(503).json({error:"AI is not configured yet"});const message=String(req.body?.message||"").trim();if(!message)return res.status(400).json({error:"Message required"});const client=new OpenAI({apiKey:KEY});const intent=await interpret(client,message);const products=await retrieve(intent,message);const catalogue=products.map(p=>({title:p.title,handle:p.handle,vendor:p.vendor,productType:p.productType,tags:p.tags,description:p.description,fitment:p.fitment?.value||"",specifications:p.specifications?.value||"",variants:p.variants.nodes.map(v=>({sku:v.sku,price:v.price,availableForSale:v.availableForSale}))}));const response=await client.responses.create({model:MODEL,instructions:SYSTEM,input:`Customer question: ${message}\nParsed bike/part: ${JSON.stringify(intent)}\n\nCandidate Hogparts products, ranked by catalogue relevance:\n${JSON.stringify(catalogue)}\n\nOnly recommend products whose catalogue evidence explicitly supports the requested part and exact bike/year. If none do, explain that no confirmed match was found.`});res.json({answer:response.output_text,intent,products:products.slice(0,6).map(p=>({title:p.title,handle:p.handle,image:p.featuredImage?.url||null,url:`https://hogparts.com/products/${p.handle}`}))})}catch(e){console.error(e);res.status(500).json({error:e.message})}});
+app.get("/",(_q,res)=>res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Hogparts AI Assistant</title><style>body{font:16px Arial,sans-serif;max-width:800px;margin:50px auto;padding:20px;background:#f5f5f5}.box{background:#fff;padding:24px;border-radius:12px}input{width:75%;padding:12px}button{padding:12px}#out{white-space:pre-wrap;margin-top:20px}</style></head><body><div class="box"><h1>Hogparts AI Assistant</h1><p>Development test interface. Not connected to the live storefront.</p><input id="q" placeholder="Ask about a product or fitment"><button onclick="go()">Ask</button><div id="out"></div></div><script>async function go(){let o=document.getElementById("out");o.textContent="Thinking...";let r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:document.getElementById("q").value})});let j=await r.json();o.textContent=j.answer||j.error||"No response"}</script></body></html>`));
+app.listen(PORT,()=>console.log(`Hogparts AI Assistant v0.2 listening on ${PORT}`));
